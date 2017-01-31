@@ -9,16 +9,34 @@ from collections import OrderedDict
 
 from osgeo import gdal, ogr
 
-from pygeotools.lib import geolib
-from pygeotools.lib import warplib
+from pygeotools.lib import geolib, warplib, iolib
+
+def run_dem_mosaic(fn_list, o, tr, t_srs, t_projwin, georef_tile_size, tile_list, threads):
+    """
+    Call dem_mosaic command with valid tile list
+    """
+    import subprocess
+    cmd = ['dem_mosaic', '--threads', threads, '--tr', tr, '--t_srs', t_srs.ExportToProj4(), \
+           '--georef-tile-size', georef_tile_size, '-o', o, '--t_projwin']
+    cmd.extend(t_projwin)
+    #Not yet implemented
+    #cmd.append('--tile-index')
+    #cmd.extend(tile_list)
+    #cmd.append(tile_list[0])
+    cmd.extend(fn_list)
+    cmd = [str(i) for i in cmd]
+    print(cmd)
+    return subprocess.call(cmd)
 
 def getparser():
-    parser = argparse.ArgumentParser(description='Utility to compute valid dem_mosaic tiles for input res/extent/proj')
-    parser.add_argument('-tr', default='min', help='Output resolution (default: %(default)s)')
-    parser.add_argument('-te', default='union', help='Output extent (default: %(default)s)')
-    parser.add_argument('-t_srs', default='first', help='Output projection (default: %(default)s)')
-    parser.add_argument('-tile_width', default=100000., type=float, help='Output tile width (meters)')
-    parser.add_argument('src_fn_list', nargs='+', help='Input filenames (img1.tif img2.tif ...)')
+    parser = argparse.ArgumentParser(description='Wrapper for dem_mosaic that will only write valid tiles')
+    parser.add_argument('--tr', default='min', help='Output resolution (default: %(default)s)')
+    parser.add_argument('--t_projwin', default='union', help='Output extent (default: %(default)s)')
+    parser.add_argument('--t_srs', default='first', help='Output projection (default: %(default)s)')
+    parser.add_argument('--georef_tile_size', type=float, default=100000., help='Output tile width (meters)')
+    parser.add_argument('--threads', type=int, default=iolib.cpu_count(), help='Number of threads')
+    parser.add_argument('-o', type=str, default=None, help='Output mosaic prefix')
+    parser.add_argument('src_fn_list', type=str, nargs='+', help='Input filenames (img1.tif img2.tif ...)')
     return parser
 
 def main():
@@ -33,7 +51,7 @@ def main():
 
     #Mosaic t_srs
     print("Parsing t_srs")
-    t_srs = warplib.parse_t_srs(args.t_srs, ds_list)
+    t_srs = warplib.parse_srs(args.t_srs, ds_list)
     print(t_srs)
 
     #Mosaic res
@@ -43,14 +61,20 @@ def main():
 
     #Mosaic extent 
     #xmin, ymin, xmax, ymax
-    print("Parsing te")
-    te = warplib.parse_extent(args.te, ds_list, t_srs=t_srs) 
-    print(te)
-    mos_xmin, mos_ymin, mos_xmax, mos_ymax = te
+    print("Parsing t_projwin")
+    t_projwin = warplib.parse_extent(args.t_projwin, ds_list, t_srs=t_srs) 
+    print(t_projwin)
+    mos_xmin, mos_ymin, mos_xmax, mos_ymax = t_projwin
 
     #Tile dimensions in output projected units (meters)
-    tile_width = args.tile_width
+    #Assume square
+    tile_width = args.georef_tile_size
     tile_height = tile_width
+
+    o = args.o
+    if o is None:
+        o = 'mos_%im/mos' % tr
+    threads = args.threads
 
     #Compute extent geom for all input datsets
     print("Computing extent geom for all input datasets")
@@ -101,9 +125,12 @@ def main():
     out_tile_list_str = ' '.join(map(str, out_tile_list))
     print(out_tile_list_str)
 
-    out_fn = 'mos_tilenum_list.txt'
+    out_fn = o+'_tilenum_list.txt'
     with open(out_fn, 'w') as f:
         f.write(out_tile_list_str)
-        
+
+    print("Running dem_mosaic")
+    run_dem_mosaic(fn_list, o, tr, t_srs, t_projwin, tile_width, out_tile_list, threads)
+   
 if __name__ == "__main__":
     main()
