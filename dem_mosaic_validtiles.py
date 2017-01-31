@@ -2,31 +2,45 @@
 """
 Precompute valid tiles for dem_mosaic
 """
+#res=32
+#res=8
+#mkdir conus_${res}m_tile
+#lfs setstripe conus_${res}m_tile --count 64
+#~/src/Tools/dem_mosaic_validtiles.py --tr $res --t_projwin 'union' --t_srs '+proj=aea +lat_1=36 +lat_2=49 +lat_0=43 +lon_0=-115 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs ' --georef_tile_size 100000 -o conus_${res}m_tile/conus_${res}m *00/*/*DEM_${res}m.tif
 
+#res=8
+#mkdir hma_${res}m_tile
+#lfs setstripe hma_${res}m_tile --count 64
+#~/src/Tools/dem_mosaic_validtiles.py --tr $res --t_projwin 'union' --t_srs '+proj=aea +lat_1=25 +lat_2=47 +lat_0=36 +lon_0=85 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs ' --georef_tile_size 100000 -o hma_${res}m_tile/hma_${res}m */*00/*/*DEM_${res}m.tif
+
+import os
 import argparse
 import math
 from collections import OrderedDict
+import time
+import subprocess
 
 from osgeo import gdal, ogr
 
 from pygeotools.lib import geolib, warplib, iolib
 
-def run_dem_mosaic(fn_list, o, tr, t_srs, t_projwin, georef_tile_size, tile_list, threads):
+def get_dem_mosaic_cmd(fn_list, o, tr, t_srs, t_projwin, georef_tile_size, threads, tile):
     """
-    Call dem_mosaic command with valid tile list
+    Call dem_mosaic command with valid tile number 
+    Eventually, could call with multiple tiles
     """
-    import subprocess
     cmd = ['dem_mosaic', '--threads', threads, '--tr', tr, '--t_srs', t_srs.ExportToProj4(), \
            '--georef-tile-size', georef_tile_size, '-o', o, '--t_projwin']
     cmd.extend(t_projwin)
     #Not yet implemented
-    #cmd.append('--tile-index')
     #cmd.extend(tile_list)
-    #cmd.append(tile_list[0])
+    cmd.append('--tile-index')
+    cmd.append(tile)
     cmd.extend(fn_list)
     cmd = [str(i) for i in cmd]
-    print(cmd)
-    return subprocess.call(cmd)
+    #print(cmd)
+    #return subprocess.call(cmd)
+    return cmd
 
 def getparser():
     parser = argparse.ArgumentParser(description='Wrapper for dem_mosaic that will only write valid tiles')
@@ -64,6 +78,8 @@ def main():
     print("Parsing t_projwin")
     t_projwin = warplib.parse_extent(args.t_projwin, ds_list, t_srs=t_srs) 
     print(t_projwin)
+    #This could trim off some fraction of a pixel around margins
+    t_projwin = geolib.extent_round(t_projwin, tr)
     mos_xmin, mos_ymin, mos_xmax, mos_ymax = t_projwin
 
     #Tile dimensions in output projected units (meters)
@@ -119,8 +135,12 @@ def main():
                 #Write out shp for debugging
                 #geolib.geom2shp(tile_geom, 'tile_%03i.shp' % tilenum)
                 break 
+    
+    #Could also preserve list of input files that intersect tile
+    #Then only process those files for given tile bounds 
+    #Avoid loading all files for each dem_mosaic call
 
-    print("Valid output tiles")
+    print("%i valid output tiles" % len(out_tile_list))
     out_tile_list.sort()
     out_tile_list_str = ' '.join(map(str, out_tile_list))
     print(out_tile_list_str)
@@ -129,8 +149,21 @@ def main():
     with open(out_fn, 'w') as f:
         f.write(out_tile_list_str)
 
-    print("Running dem_mosaic")
-    run_dem_mosaic(fn_list, o, tr, t_srs, t_projwin, tile_width, out_tile_list, threads)
-   
+    print("Running dem_mosaic in parallel")
+    dem_mosaic_args = (fn_list, o, tr, t_srs, t_projwin, tile_width, 1)
+    processes = []
+    log = False
+    delay = 1
+    outf = open(os.devnull, 'w') 
+    for tile in out_tile_list:
+        cmd = get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile)
+        if log:
+            outf = open('%s-log-dem_mosaic-tile-%i.log' % (o, tile), 'w')
+            #can add close_fds=True to Popen to close logfile
+        processes.append(subprocess.Popen(cmd, stdout=outf, stderr=subprocess.STDOUT))
+        time.sleep(delay)
+    for p in processes: p.wait()
+    outf = None
+
 if __name__ == "__main__":
     main()
