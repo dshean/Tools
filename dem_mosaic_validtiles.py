@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 """
-Precompute valid tiles for dem_mosaic
+Run dem_mosaic in parallel for valid tiles only
 """
 #res=32
 #res=8
@@ -24,31 +24,13 @@ from osgeo import gdal, ogr
 
 from pygeotools.lib import geolib, warplib, iolib
 
-def get_dem_mosaic_cmd(fn_list, o, tr, t_srs, t_projwin, georef_tile_size, threads, tile):
-    """
-    Call dem_mosaic command with valid tile number 
-    Eventually, could call with multiple tiles
-    """
-    cmd = ['dem_mosaic', '--threads', threads, '--tr', tr, '--t_srs', t_srs.ExportToProj4(), \
-           '--georef-tile-size', georef_tile_size, '-o', o, '--t_projwin']
-    cmd.extend(t_projwin)
-    #Not yet implemented
-    #cmd.extend(tile_list)
-    cmd.append('--tile-index')
-    cmd.append(tile)
-    cmd.extend(fn_list)
-    cmd = [str(i) for i in cmd]
-    #print(cmd)
-    #return subprocess.call(cmd)
-    return cmd
-
 def getparser():
     parser = argparse.ArgumentParser(description='Wrapper for dem_mosaic that will only write valid tiles')
     parser.add_argument('--tr', default='min', help='Output resolution (default: %(default)s)')
     parser.add_argument('--t_projwin', default='union', help='Output extent (default: %(default)s)')
     parser.add_argument('--t_srs', default='first', help='Output projection (default: %(default)s)')
     parser.add_argument('--georef_tile_size', type=float, default=100000., help='Output tile width (meters)')
-    parser.add_argument('--threads', type=int, default=iolib.cpu_count(), help='Number of threads')
+    parser.add_argument('--threads', type=int, default=iolib.cpu_count(), help='Number of simultaneous jobs to run')
     parser.add_argument('-o', type=str, default=None, help='Output mosaic prefix')
     parser.add_argument('src_fn_list', type=str, nargs='+', help='Input filenames (img1.tif img2.tif ...)')
     return parser
@@ -90,6 +72,11 @@ def main():
     o = args.o
     if o is None:
         o = 'mos_%im/mos' % tr
+    odir = os.path.dirname(o)
+    if not os.path.exists(odir): 
+        os.makedirs(odir)
+    cmd = ['lfs', 'setstripe', odir, '--count', '64']
+    subprocess.call(cmd)
     threads = args.threads
 
     #Compute extent geom for all input datsets
@@ -153,16 +140,19 @@ def main():
     dem_mosaic_args = (fn_list, o, tr, t_srs, t_projwin, tile_width, 1)
     processes = []
     log = False
-    delay = 1
+    delay = 0.1
     outf = open(os.devnull, 'w') 
-    for tile in out_tile_list:
-        cmd = get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile)
-        if log:
-            outf = open('%s-log-dem_mosaic-tile-%i.log' % (o, tile), 'w')
-            #can add close_fds=True to Popen to close logfile
-        processes.append(subprocess.Popen(cmd, stdout=outf, stderr=subprocess.STDOUT))
-        time.sleep(delay)
-    for p in processes: p.wait()
+    #outf = open('%s-log-dem_mosaic-tile-%i.log' % (o, tile), 'w')
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        for n, tile in enumerate(out_tile_list):
+            #print('%i of %i tiles: %i' % (n+1, len(out_tile_list), tile))
+            cmd = geolib.get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile)
+            #print cmd
+            executor.submit(subprocess.call, cmd, stdout=outf, stderr=subprocess.STDOUT)
+            time.sleep(delay)
+
     outf = None
 
 if __name__ == "__main__":
