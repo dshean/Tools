@@ -14,6 +14,7 @@ Run dem_mosaic in parallel for valid tiles only
 #~/src/Tools/dem_mosaic_validtiles.py --tr $res --t_projwin 'union' --t_srs '+proj=aea +lat_1=25 +lat_2=47 +lat_0=36 +lon_0=85 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs ' --georef_tile_size 100000 -o hma_${res}m_tile/hma_${res}m */*00/*/*DEM_${res}m.tif
 
 import os
+import glob
 import argparse
 import math
 from collections import OrderedDict
@@ -73,6 +74,10 @@ def main():
     if o is None:
         o = 'mos_%im/mos' % tr
     odir = os.path.dirname(o)
+    #If dirname is empty, use prefix for new directory
+    if not odir:
+        odir = o
+        o = os.path.join(odir, o)
     if not os.path.exists(odir): 
         os.makedirs(odir)
     cmd = ['lfs', 'setstripe', odir, '--count', '64']
@@ -154,6 +159,27 @@ def main():
             time.sleep(delay)
 
     outf = None
+
+    print("Creating vrt of valid tiles")
+    out_tile_fn_list = glob.glob(o+'-tile-*.tif')
+    vrt_fn = o+'.vrt'
+    cmd = ['gdalbuildvrt', vrt_fn] 
+    cmd.extend(out_tile_fn_list)
+    print(cmd)
+    subprocess.call(cmd)
+
+    #This cleans up all of the log txt files (potentially 1000s of files)
+    #Want to preserve these, as they contain list of DEMs that went into each tile
+    log_fn_list = glob.glob(o+'-log-dem_mosaic-*.txt')
+    print("Cleaning up %i dem_mosaic log files" % len(log_fn_list))
+    import tarfile
+    tar_fn = o+'_dem_mosaic_log.tar.gz'
+    with tarfile.open(tar_fn, "w:gz") as tar:
+        for log_fn in log_fn_list:
+            print log_fn
+            tar.add(log_fn)
+    for log_fn in log_fn_list:
+        os.remove(log_fn)
 
 if __name__ == "__main__":
     main()
