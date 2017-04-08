@@ -17,21 +17,25 @@ import os
 import glob
 import argparse
 import math
-from collections import OrderedDict
 import time
 import subprocess
+import tarfile
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from osgeo import gdal, ogr
 
 from pygeotools.lib import geolib, warplib, iolib
 
 def getparser():
+    stat_choices = ['first', 'last', 'min', 'max', 'stddev', 'count', 'median']
     parser = argparse.ArgumentParser(description='Wrapper for dem_mosaic that will only write valid tiles')
     parser.add_argument('--tr', default='min', help='Output resolution (default: %(default)s)')
     parser.add_argument('--t_projwin', default='union', help='Output extent (default: %(default)s)')
     parser.add_argument('--t_srs', default='first', help='Output projection (default: %(default)s)')
     parser.add_argument('--georef_tile_size', type=float, default=100000., help='Output tile width (meters)')
     parser.add_argument('--threads', type=int, default=iolib.cpu_count(), help='Number of simultaneous jobs to run')
+    parser.add_argument('--stat', type=str, default=None, choices=stat_choices, help='Statistic to use (default: weighted mean)')
     parser.add_argument('-o', type=str, default=None, help='Output mosaic prefix')
     parser.add_argument('src_fn_list', type=str, nargs='+', help='Input filenames (img1.tif img2.tif ...)')
     return parser
@@ -65,10 +69,19 @@ def main():
     t_projwin = geolib.extent_round(t_projwin, tr)
     mos_xmin, mos_ymin, mos_xmax, mos_ymax = t_projwin
 
+    stat = args.stat
+    if stat is not None:
+        print("Mosaic type: %s" % stat)
+    else:
+        print("Mosaic type: Weighted average")
+
     #Tile dimensions in output projected units (meters)
     #Assume square
     tile_width = args.georef_tile_size
     tile_height = tile_width
+
+    #This is number of simultaneous processes, each with one thread
+    threads = args.threads
 
     o = args.o
     if o is None:
@@ -80,9 +93,8 @@ def main():
         o = os.path.join(odir, o)
     if not os.path.exists(odir): 
         os.makedirs(odir)
-    cmd = ['lfs', 'setstripe', odir, '--count', '64']
-    subprocess.call(cmd)
-    threads = args.threads
+        cmd = ['lfs', 'setstripe', odir, '--count', str(threads)]
+        subprocess.call(cmd)
 
     #Compute extent geom for all input datsets
     print("Computing extent geom for all input datasets")
@@ -149,22 +161,27 @@ def main():
     outf = open(os.devnull, 'w') 
     #outf = open('%s-log-dem_mosaic-tile-%i.log' % (o, tile), 'w')
 
-    from concurrent.futures import ThreadPoolExecutor
+    tile_fn_list = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for n, tile in enumerate(out_tile_list):
             #print('%i of %i tiles: %i' % (n+1, len(out_tile_list), tile))
-            cmd = geolib.get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile)
-            #print cmd
+            cmd = geolib.get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile, stat=stat)
             executor.submit(subprocess.call, cmd, stdout=outf, stderr=subprocess.STDOUT)
+            tile_fn = '%s-tile-%03i.tif' % (o, tile)
+            if stat is not None:
+                tile_fn = os.path.splitext(tile_fn)[0]+'-%s.tif' % stat
+            tile_fn_list.append(tile_fn)
             time.sleep(delay)
 
     outf = None
 
     print("Creating vrt of valid tiles")
-    out_tile_fn_list = glob.glob(o+'-tile-*.tif')
+    #tile_fn_list = glob.glob(o+'-tile-*.tif')
     vrt_fn = o+'.vrt'
+    if stat is not None:
+        vrt_fn = os.path.splitext(vrt_fn)[0]+'_%s.vrt' % stat
     cmd = ['gdalbuildvrt', vrt_fn] 
-    cmd.extend(out_tile_fn_list)
+    cmd.extend(tile_fn_list)
     print(cmd)
     subprocess.call(cmd)
 
@@ -172,11 +189,12 @@ def main():
     #Want to preserve these, as they contain list of DEMs that went into each tile
     log_fn_list = glob.glob(o+'-log-dem_mosaic-*.txt')
     print("Cleaning up %i dem_mosaic log files" % len(log_fn_list))
-    import tarfile
-    tar_fn = o+'_dem_mosaic_log.tar.gz'
+    if stat is not None:
+        tar_fn = o+'_%s_dem_mosaic_log.tar.gz' % stat
+    else:
+        tar_fn = o+'_dem_mosaic_log.tar.gz'
     with tarfile.open(tar_fn, "w:gz") as tar:
         for log_fn in log_fn_list:
-            print log_fn
             tar.add(log_fn)
     for log_fn in log_fn_list:
         os.remove(log_fn)
