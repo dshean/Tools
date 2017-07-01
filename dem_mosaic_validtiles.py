@@ -128,17 +128,26 @@ def main():
             tile_geom_wkt = 'POLYGON(({0}))'.format(', '.join(['{0} {1}'.format(*a) for a in zip(x,y)]))
             tile_geom = ogr.CreateGeometryFromWkt(tile_geom_wkt)
             tile_geom.AssignSpatialReference(t_srs)
-            tile_dict[tilenum] = tile_geom
+            #tile_dict[tilenum] = tile_geom
+            tile_dict[tilenum] = {}
+            tile_dict[tilenum]['geom'] = tile_geom
 
     out_tile_list = []
     print("Computing valid intersections between input dataset geom and tile geom")
-    for tilenum, tile_geom in tile_dict.iteritems():
+    #for tilenum, tile_geom in tile_dict.iteritems():
+    for tilenum in tile_dict.keys():
+        tile_geom = tile_dict[tilenum]['geom']
+        tile_dict_fn = []
         for ds, ds_geom in input_geom_dict.iteritems():
             if tile_geom.Intersects(ds_geom):
                 out_tile_list.append(tilenum)
+                ds_fn = ds.GetFileList()[0]
                 #Write out shp for debugging
                 #geolib.geom2shp(tile_geom, 'tile_%03i.shp' % tilenum)
+                #To create unique tile fn lists comment break and uncomment following lines
                 break 
+                #tile_dict_fn.append(ds_fn)
+            #tile_dict[tilenum]['fn_list'] = tile_dict_fn
     
     #Could also preserve list of input files that intersect tile
     #Then only process those files for given tile bounds 
@@ -146,15 +155,18 @@ def main():
 
     print("%i valid output tiles" % len(out_tile_list))
     out_tile_list.sort()
+    out_tile_list = list(set(out_tile_list))
+    ni = max([len(str(i)) for i in out_tile_list])
     out_tile_list_str = ' '.join(map(str, out_tile_list))
     print(out_tile_list_str)
 
+    #Better to dump dictionary here, use json
     out_fn = o+'_tilenum_list.txt'
     with open(out_fn, 'w') as f:
         f.write(out_tile_list_str)
 
-    print("Running dem_mosaic in parallel")
-    dem_mosaic_args = (fn_list, o, tr, t_srs, t_projwin, tile_width, 1)
+    print("Running dem_mosaic in parallel with %i threads" % threads)
+    dem_mosaic_args = [fn_list, o, tr, t_srs, t_projwin, tile_width, 1]
     processes = []
     log = False
     delay = 0.1
@@ -165,9 +177,12 @@ def main():
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for n, tile in enumerate(out_tile_list):
             #print('%i of %i tiles: %i' % (n+1, len(out_tile_list), tile))
+            #This passes only files that intersect the tile, but issues with dem_mosaic reducing bounding box
+            #dem_mosaic_args[0] = tile_dict[tile]['fn_list']
+            #Continue with inefficient approach providing full filename list to each dem_mosaic tile
             cmd = geolib.get_dem_mosaic_cmd(*dem_mosaic_args, tile=tile, stat=stat)
             executor.submit(subprocess.call, cmd, stdout=outf, stderr=subprocess.STDOUT)
-            tile_fn = '%s-tile-%03i.tif' % (o, tile)
+            tile_fn = '%s-tile-%0*i.tif' % (o, ni, tile)
             if stat is not None:
                 tile_fn = os.path.splitext(tile_fn)[0]+'-%s.tif' % stat
             tile_fn_list.append(tile_fn)
@@ -184,6 +199,8 @@ def main():
     cmd.extend(tile_fn_list)
     print(cmd)
     subprocess.call(cmd)
+
+    #Should create tile index shp/kml from tile_geom
 
     #This cleans up all of the log txt files (potentially 1000s of files)
     #Want to preserve these, as they contain list of DEMs that went into each tile
