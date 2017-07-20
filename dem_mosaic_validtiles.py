@@ -27,6 +27,11 @@ from osgeo import gdal, ogr
 
 from pygeotools.lib import geolib, warplib, iolib
 
+#Hack to work around file open limit
+#Set this in shell with `ulimit -n 65536` before running
+#import resource
+#resource.setrlimit(resource.RLIMIT_NOFILE,(resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
 def getparser():
     stat_choices = ['first', 'last', 'min', 'max', 'stddev', 'count', 'median']
     parser = argparse.ArgumentParser(description='Wrapper for dem_mosaic that will only write valid tiles')
